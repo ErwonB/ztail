@@ -1,0 +1,13 @@
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane {
+        plugin location="file:target/wasm32-wasip1/release/ztail.wasm" {
+            pattern_0 "/tmp/ztail-test-*.log"
+        }
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

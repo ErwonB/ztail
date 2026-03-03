@@ -1,0 +1,10 @@
+[package]
+name = "ztail"
+version = "0.1.0"
+edition = "2021"
+description = "Zellij plugin that monitors glob patterns for new log files and opens tail -f in floating panes"
+
+[dependencies]
+zellij-tile = "0.43"
+glob = "0.3"
+
