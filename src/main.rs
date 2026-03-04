@@ -58,7 +58,8 @@ impl ZellijPlugin for State {
                     // Remap /host to the filesystem root so glob patterns work
                     // with absolute paths like /tmp/*.log -> /host/tmp/*.log
                     change_host_folder(PathBuf::from("/"));
-                    self.scan_for_new_files();
+                    // Record already-existing files so they are ignored
+                    self.snapshot_existing_files();
                     set_timeout(self.poll_interval);
                     hide_self();
                 }
@@ -78,6 +79,38 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    /// Collect all files currently matching the configured patterns into
+    /// `known_files` so they are silently ignored. No panes are opened.
+    fn snapshot_existing_files(&mut self) {
+        for pattern in &self.patterns.clone() {
+            let host_pattern = format!("{}{}", HOST_PREFIX, pattern);
+
+            match glob::glob(&host_pattern) {
+                Ok(paths) => {
+                    for entry in paths {
+                        match entry {
+                            Ok(path) => {
+                                let real_path = path
+                                    .to_string_lossy()
+                                    .strip_prefix(HOST_PREFIX)
+                                    .unwrap_or(&path.to_string_lossy())
+                                    .to_string();
+
+                                self.known_files.insert(real_path);
+                            }
+                            Err(e) => {
+                                eprintln!("[ztail] Glob entry error: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ztail] Glob error for '{}': {}", host_pattern, e);
+                }
+            }
+        }
+    }
+
     fn scan_for_new_files(&mut self) {
         for pattern in &self.patterns.clone() {
             let host_pattern = format!("{}{}", HOST_PREFIX, pattern);
