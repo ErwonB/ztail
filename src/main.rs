@@ -12,6 +12,8 @@ struct State {
     ignore_patterns: Vec<String>,
     /// Track whether we're doing the initial snapshot (don't open panes)
     snapshotting: bool,
+    /// Track how many snapshot responses are still pending
+    pending_snapshot_count: usize,
 }
 
 impl Default for State {
@@ -23,6 +25,7 @@ impl Default for State {
             active: false,
             ignore_patterns: Vec::new(),
             snapshotting: false,
+            pending_snapshot_count: 0,
         }
     }
 }
@@ -63,6 +66,19 @@ impl ZellijPlugin for State {
             }
         }
 
+        // Restore known_files persisted from a previous session
+        if let Ok(saved) = std::fs::read_to_string(Self::state_file_path()) {
+            self.known_files = saved
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            eprintln!(
+                "[ztail] Restored {} known files from state",
+                self.known_files.len()
+            );
+        }
+
         request_permission(&[PermissionType::RunCommands]);
 
         subscribe(&[
@@ -77,8 +93,13 @@ impl ZellijPlugin for State {
             Event::PermissionRequestResult(status) => {
                 if status == PermissionStatus::Granted {
                     self.active = true;
-                    // Do initial snapshot: expand all patterns to record existing files
-                    self.snapshotting = true;
+                    // Do initial snapshot: expand all patterns to record existing files.
+                    // Only snapshot if we have no restored state; if state was restored we
+                    // already know the existing files and can start watching immediately.
+                    if self.known_files.is_empty() {
+                        self.snapshotting = true;
+                        self.pending_snapshot_count = self.patterns.len();
+                    }
                     self.run_glob_commands();
                     set_timeout(self.poll_interval);
                     hide_self();
@@ -145,10 +166,7 @@ impl State {
             // We use -d to avoid listing directory contents if a glob matches a dir.
             let shell_cmd = format!("ls -1d {} 2>/dev/null || true", pattern);
 
-            run_command(
-                &["bash", "-c", &shell_cmd],
-                context,
-            );
+            run_command(&["bash", "-c", &shell_cmd], context);
         }
     }
 
@@ -179,19 +197,52 @@ impl State {
                     self.known_files.insert(file.to_string());
                 }
             }
-            // Check if all patterns have been snapshotted
-            // (simple approach: after first timer fires, snapshotting is done)
-            self.snapshotting = false;
+
+            // Only exit snapshot mode once ALL pattern results have returned
+            self.pending_snapshot_count = self.pending_snapshot_count.saturating_sub(1);
+            if self.pending_snapshot_count == 0 {
+                self.snapshotting = false;
+                eprintln!("[ztail] Snapshot complete, watching for new files.");
+                self.persist_known_files();
+            }
         } else {
             for file in &files {
                 let file_str = file.to_string();
                 if !self.is_ignored(&file_str) && !self.known_files.contains(&file_str) {
                     eprintln!("[ztail] New file detected: {}", file_str);
                     self.known_files.insert(file_str.clone());
+                    self.persist_known_files();
                     self.open_tail_pane(&file_str);
                 }
             }
         }
+    }
+
+    /// Persist the current known_files set so it survives session detach/reattach.
+    fn persist_known_files(&self) {
+        let serialized = self
+            .known_files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = Self::state_file_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(path, serialized) {
+            eprintln!("[ztail] Failed to persist known files: {}", e);
+        }
+    }
+
+    fn state_file_path() -> std::path::PathBuf {
+        // Place the state file next to other zellij data, falling back to /tmp.
+        let base = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+        base.join(".cache")
+            .join("zellij")
+            .join("ztail_known_files.txt")
     }
 
     /// Check if a file path matches any of the ignore patterns.
